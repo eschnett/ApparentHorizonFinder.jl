@@ -1,0 +1,17 @@
+name = "ApparentHorizonFinder"
+uuid = "2326d305-03d0-4260-ba27-fc7d1edfc55d"
+version = "0.1.0"
+authors = ["Erik Schnetter <schnetter@gmail.com>"]
+
+[deps]
+FastSphericalHarmonics = "d335c211-7587-445e-a753-f0b1fb7e445f"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+
+[compat]
+FastSphericalHarmonics = "1.4.0"
+LinearAlgebra = "1.10.0"
+Printf = "1.11.0"
+StaticArrays = "1.9.18"
+julia = "1.10"

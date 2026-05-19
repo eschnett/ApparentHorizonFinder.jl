@@ -1,4 +1,6 @@
 [deps]
+ApparentHorizonFinder = "2326d305-03d0-4260-ba27-fc7d1edfc55d"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
+SpacetimeMetrics = "77e61b41-605e-43a6-b70f-04b7dcd1f572"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

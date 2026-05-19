@@ -1,0 +1,3 @@
+var documenterSearchIndex = {"docs":
+[{"category":"section","location":"#ApparentHorizonFinder.jl","page":"ApparentHorizonFinder.jl","text":"","title":"ApparentHorizonFinder.jl"},{"category":"method","location":"#ApparentHorizonFinder.find_horizon-Tuple{Any, StaticArraysCore.SVector{3, Float64}, Matrix{ComplexF64}, Float64, Int64}","page":"ApparentHorizonFinder.jl","text":"function find_horizon(admvars, origin::SVector{3,Float64}, hlm::Matrix{Complex{Float64}}, atol::Float64, maxiters::Int)\nfunction find_horizon(admvars, origin::SVector{3,Float64}, N::Int, r::Float64, atol::Float64, maxiters::Int)\n\n\n\n\n\n","title":"ApparentHorizonFinder.find_horizon"}]
+}

@@ -2,6 +2,8 @@
 
 Find apparent horizons in a spacelike hypersurface.
 
+[![CI](https://github.com/eschnett/ApparentHorizonFinder.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/eschnett/ApparentHorizonFinder.jl/actions/workflows/CI.yml)
+
 ## Overview
 
 Fast flow method by Gundlach:

@@ -6,6 +6,19 @@ using Printf
 using StaticArrays
 
 export ADMVars
+"""
+    ADMVars(γ, ∂γ, K)
+
+ADM 3+1 Cauchy data at one spatial point, expressed in Cartesian coordinates.
+
+- `γ::SMatrix{3,3}`           — induced spatial metric, `γ[i,j] = γ_{ij}`.
+- `∂γ::SArray{Tuple{3,3,3}}`  — partial derivatives, `∂γ[i,j,k] = ∂_k γ_{ij}`.
+- `K::SMatrix{3,3}`           — extrinsic curvature with the standard sign
+  convention `K_{ij} = −(1/2α)(∂_t γ_{ij} − D_i β_j − D_j β_i)`.
+
+[`find_horizon`](@ref) expects a callable `x::SVector{3,Float64} -> ADMVars`
+that supplies these quantities at every queried point.
+"""
 struct ADMVars{T}
     γ::SMatrix{3,3,T,3^2}
     ∂γ::SArray{Tuple{3,3,3},T,3,3^3}    # ∂γ[i,j,k] = ∂_k γ_{ij}
@@ -24,8 +37,44 @@ end
 
 export find_horizon
 """
-    function find_horizon(admvars, origin::SVector{3,Float64}, hlm::Matrix{Complex{Float64}}, atol::Float64, maxiters::Int)
-    function find_horizon(admvars, origin::SVector{3,Float64}, N::Int, r::Float64, atol::Float64, maxiters::Int)
+    find_horizon(admvars, origin, hlm, atol, maxiters)      -> (; origin, hlm)
+    find_horizon(admvars, origin, N::Int, r::Float64,
+                 atol, maxiters)                            -> (; origin, hlm)
+
+Locate an apparent horizon (marginally outer trapped surface) by the
+pseudo-spectral fast flow of Gundlach, arXiv:gr-qc/9707050.
+
+The candidate surface is parameterised as the level set
+`F(x) = |x − origin| − h(θ, φ) = 0`, with `(θ, φ)` measured from `origin`. The
+shape function `h` is expanded in spin-0 spherical harmonics (`hlm`, complex
+layout though `h` is real). At each iteration:
+
+1. The expansion `H = D_i s^i + K_{ij} s^i s^j − K` is evaluated on the
+   surface, with the principal-symbol weight `ρ` from eq. (28) of the paper
+   applied to keep the iteration well-conditioned.
+2. `hlm` is updated by the fast-flow rule
+   `Δh_{lm} = −A/(1 + B·l(l+1)) · (ρ H)_{lm}`, which acts as `(L²)⁻¹` on the
+   high-`l` modes and as a small relaxation on `l = 0`.
+3. `origin` is recentred by absorbing the `l = 1` dipole of `h`; this keeps
+   the surface close to spherical about `origin`, which the algorithm requires
+   for good convergence.
+
+# Arguments
+- `admvars`: callable `admvars(x::SVector{3,Float64}) -> ADMVars` returning the
+  local ADM data at the Cartesian point `x`.
+- `origin::SVector{3,Float64}`: initial parametrisation origin. Must lie
+  inside the star-shaped candidate surface.
+- `hlm::Matrix{Complex{Float64}}`, size `(N, 2N-1)`: initial spin-0 spinsph
+  coefficients of `h(θ, φ)`. The second signature builds this from a sphere of
+  radius `r > 0` at angular resolution `N`.
+- `atol::Float64`: convergence threshold on the L² norm of the (`ρ`-weighted)
+  expansion.
+- `maxiters::Int`: hard cap on iterations.
+
+# Returns
+NamedTuple `(; origin, hlm)`: the final recentred origin and converged spin-0
+spinsph coefficients of `h`. The Cartesian horizon points recover as
+`origin + h(θ,φ) · r̂(θ,φ)`.
 """
 function find_horizon(admvars, origin::SVector{3,Float64}, hlm::Matrix{Complex{Float64}}, atol::Float64, maxiters::Int)
     N, M = size(hlm)
@@ -93,6 +142,36 @@ function find_horizon(admvars, origin::SVector{3,Float64}, N::Int, r::Float64, a
     hlm = spinsph_transform(h, 0)
     return find_horizon(admvars, origin, hlm, atol, maxiters)
 end
+
+export horizon_points
+"""
+    horizon_points(origin::SVector{3,Float64},
+                   hlm::Matrix{Complex{Float64}}) -> Matrix{SVector{3,Float64}}
+    horizon_points(result) -> Matrix{SVector{3,Float64}}
+
+Reconstruct the Cartesian points of the horizon surface on its `(θ, φ)`
+collocation grid (size `(N, 2N-1)`, matching `sph_points(N)` from
+`FastSphericalHarmonics`). Each entry is `origin + h(θ_i, φ_j) · r̂(θ_i, φ_j)`,
+where `h` is evaluated from `hlm` and
+`r̂ = (sin θ cos φ, sin θ sin φ, cos θ)`.
+
+The second form accepts the `NamedTuple` returned by [`find_horizon`](@ref).
+"""
+function horizon_points(origin::SVector{3,Float64}, hlm::Matrix{Complex{Float64}})
+    N, M = size(hlm)
+    @assert M == 2N - 1
+    h = real.(spinsph_evaluate(hlm, 0))
+    θgrid, φgrid = sph_points(N)
+    pts = Matrix{SVector{3,Float64}}(undef, N, M)
+    for j in 1:M, i in 1:N
+        sθ, cθ = sincos(θgrid[i])
+        sφ, cφ = sincos(φgrid[j])
+        r̂ = SVector(sθ * cφ, sθ * sφ, cθ)
+        pts[i, j] = origin + h[i, j] * r̂
+    end
+    return pts
+end
+horizon_points(result::NamedTuple) = horizon_points(result.origin, result.hlm)
 
 function expansion(admvars, origin::SVector{3}, hlm::Matrix{Complex{Float64}}; modification=nothing)
     N, M = size(hlm)

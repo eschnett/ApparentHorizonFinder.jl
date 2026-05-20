@@ -56,7 +56,7 @@ using StaticArrays
 function kerr_schild_metric(p::SVector{3})
     x, y, z = p
     M = 1.0
-    a = 0.8
+    a = 0.9
     ks = KerrSchild(M, a)
     t = 0
     g, ∂g = dmetric(ks, SVector{4}(t, x, y, z))

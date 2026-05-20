@@ -4,3 +4,8 @@ ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 SpacetimeMetrics = "77e61b41-605e-43a6-b70f-04b7dcd1f572"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+# SpacetimeMetrics is not yet registered in General; fetch it directly from GitHub.
+# Requires Julia ≥ 1.11 (see CI matrix).
+[sources]
+SpacetimeMetrics = {url = "https://github.com/eschnett/SpacetimeMetrics.jl"}

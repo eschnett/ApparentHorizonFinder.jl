@@ -116,8 +116,8 @@ function find_horizon(admvars, origin::SVector{3,Float64}, hlm::Matrix{Float64},
             origin[2],
             origin[3]
         )
-        H_norm < atol && return (; success=true, iter, origin, hlm)
-        (iter == maxiters || h_avg < 1.0e-6) && return (; success=false, iter, origin, hlm)
+        H_norm < atol && return (; success=true, iters=iter, origin, hlm)
+        (iter == maxiters || h_avg < 1.0e-6) && return (; success=false, iters=iter, origin, hlm)
 
         A = α / (lmax * (lmax+1)) + β
         B = β / α
@@ -224,43 +224,53 @@ end
 
 function expansion(admvars, origin::SVector{3}, hlm::Matrix{Float64}; modification=nothing)
     N, M = size(hlm)
+    lmax = N - 1
 
-    # FSH real-array conventions: for spin-0 input `f`, `spinsph_eth(_, 0)`
-    # returns SVector{2} coefficients of the spin-1 quantity ðf, and
-    # `spinsph_evaluate(_, 1)` gives its grid values as SVector{2}, where
-    # ðf|_{grid}[1] = -∂_θ f  and  ðf|_{grid}[2] = -(1/sinθ) ∂_φ f
-    # (the analytic ð = -[∂_θ + (i/sinθ) ∂_φ]; the m<0 sign-flip seen in the
-    # complex-array path is absorbed into this real-array storage).
-    ðhlm = spinsph_eth(hlm, 0)      # spin-1 coefficients
-    Δhlm = spinsph_ethbar(ðhlm, 1)  # ð̄ð h = Δ_S h, back to spin 0
+    # The public `hlm` storage stays in FSH's real-array spin-0 layout (kept
+    # for backwards compatibility with `find_horizon`'s dipole arithmetic),
+    # but the orthonormal-frame Hessian needs spin-2 quantities that the
+    # real-array API does not support. We therefore round-trip h through the
+    # complex spin-0 layout, build ð²h via the complex eth chain, and apply
+    # an empirically-determined m = −1 column flip (see the FSH-convention
+    # tests at the top of `test/runtests.jl`) to recover the textbook
+    # spin-2 grid value (Hθθ − Hφφ) + 2i Hθφ.
+    h = spinsph_evaluate(hlm, 0)                       # Float64 grid values
+    hlm_c = spinsph_transform(ComplexF64.(h), 0)       # complex spin-0 coeffs
 
-    # Grid synthesis
-    h = spinsph_evaluate(hlm, 0)
-    ðh = spinsph_evaluate(ðhlm, 1)
-    Δh = spinsph_evaluate(Δhlm, 0)
+    # ∂_θ h and (1/sinθ) ∂_φ h via the real-array path — this version
+    # already absorbs the m < 0 spin-1 sign convention into the SVector{2}
+    # grid values, so they are interpretable as analytic gradient pieces:
+    #   ðh|_{grid}[1] = −∂_θ h,   ðh|_{grid}[2] = −(1/sinθ) ∂_φ h.
+    ðh_real = spinsph_evaluate(spinsph_eth(hlm, 0), 1)
 
-    # Orthonormal-frame surface gradient (flip sign of the FSH minus convention).
-    v_θ̂ = [-ðh[i, j][1] for i in 1:N, j in 1:M]   # ∂_θ h
-    v_φ̂ = [-ðh[i, j][2] for i in 1:N, j in 1:M]   # (1/sinθ) ∂_φ h
+    # Δh = ð̄ð h directly in spin-0 coefficient space (eigenvalue −l(l+1)).
+    Δhlm_c = copy(hlm_c)
+    for l in 0:lmax, m in (-l):l
+        Δhlm_c[spinsph_mode(0, l, m)] *= -l * (l + 1)
+    end
+    Δh = real.(spinsph_evaluate(Δhlm_c, 0))
 
-    # Second derivatives. FSH's real-array storage does not support spin 2, so
-    # instead of going through ð²h we treat v_θ̂ and v_φ̂ as new spin-0 scalars
-    # and apply ð once more — this stays inside the validated spin-0 / spin-1
-    # path. The orthonormal-frame Hessian of h is then
-    #   H_{θ̂θ̂} = ∂²_θ h                = -ðv_θ̂[1]
-    #   H_{φ̂φ̂} = (1/sin²θ) ∂²_φ h + cotθ ∂_θ h = Δh - H_{θ̂θ̂}   (trace identity)
-    #   H_{θ̂φ̂} = (1/sinθ) ∂_θ ∂_φ h - cotθ v_φ̂  = -ðv_φ̂[1]
-    ðvθ = spinsph_evaluate(spinsph_eth(spinsph_transform(v_θ̂, 0), 0), 1)
-    ðvφ = spinsph_evaluate(spinsph_eth(spinsph_transform(v_φ̂, 0), 0), 1)
+    # ð²h via the complex eth chain. FSH's spin-2 grid evaluation agrees with
+    # the textbook (Hθθ − Hφφ) + 2i Hθφ at every m EXCEPT m = −1, where it
+    # has the opposite sign; flip column 2 of the spin-2 coefficients to
+    # absorb that.
+    ð2hlm_c = spinsph_eth(spinsph_eth(hlm_c, 0), 1)
+    ð2hlm_c[:, 2] .*= -1
+    ð2h = spinsph_evaluate(ð2hlm_c, 2)
 
     θgrid, φgrid = sph_points(N)
     H = Matrix{Float64}(undef, N, M)
     for j in 1:M, i in 1:N
-        Hθθ = -ðvθ[i, j][1]
-        Hφφ = Δh[i, j] - Hθθ
-        Hθφ = -ðvφ[i, j][1]
+        vθ = -ðh_real[i, j][1]              # ∂_θ h
+        vφ = -ðh_real[i, j][2]              # (1/sinθ) ∂_φ h
+        Δhij = Δh[i, j]
+        re_ð2 = real(ð2h[i, j])
+        im_ð2 = imag(ð2h[i, j])
+        Hθθ = (Δhij + re_ð2) / 2            # ∂²_θ h
+        Hφφ = (Δhij - re_ð2) / 2            # (1/sin²θ) ∂²_φ h + cotθ ∂_θ h
+        Hθφ = im_ð2 / 2                     # (1/sinθ) ∂_θ ∂_φ h − cotθ v_φ̂
         H[i, j] = expansion_at_point(
-            admvars, origin, θgrid[i], φgrid[j], h[i, j], v_θ̂[i, j], v_φ̂[i, j], Hθθ, Hφφ, Hθφ; modification
+            admvars, origin, θgrid[i], φgrid[j], h[i, j], vθ, vφ, Hθθ, Hφφ, Hθφ; modification
         )
     end
 

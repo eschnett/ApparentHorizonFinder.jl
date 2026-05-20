@@ -97,4 +97,4 @@ fig
 save("horizon.png", fig)
 ```
 
-![Horizon surface](horizon.png "Apparent horizon for a Kerr-Schild metric with M=1, a=0.6")
+![Horizon surface](horizon.png "Apparent horizon for a Kerr-Schild metric with M=1, a=0.9")

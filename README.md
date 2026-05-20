@@ -56,7 +56,7 @@ using StaticArrays
 function kerr_schild_metric(p::SVector{3})
     x, y, z = p
     M = 1.0
-    a = 0.6
+    a = 0.8
     ks = KerrSchild(M, a)
     t = 0
     g, ∂g = dmetric(ks, SVector{4}(t, x, y, z))
@@ -74,12 +74,12 @@ Next we call the horizon finder:
 
 ```julia
 x₀ = SVector{3}(0.0, 0.0, 0.1)
-N = 8
+N = 16
 r = 2.0
 atol = 1.0e-8
 maxiters = 100
-origin, hlm = find_horizon(kerr_schild_metric, x₀, N, r, atol, maxiters)
-pts = horizon_points(origin, hlm)
+AH = find_horizon(kerr_schild_metric, x₀, N, r, atol, maxiters)
+pts = horizon_points(AH.origin, AH.hlm)
 ```
 
 The number of points (and the number of multipoles) depends on the chosen `N`.

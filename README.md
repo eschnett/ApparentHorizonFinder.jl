@@ -1,4 +1,4 @@
-# ApparentHorizonfinder.jl
+# ApparentHorizonFinder.jl
 
 Find apparent horizons in a spacelike hypersurface.
 

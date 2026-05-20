@@ -25,7 +25,7 @@ struct ADMVars{T}
     K::SMatrix{3,3,T,3^2}
 end
 
-function spinsph_mapreduce(op, f, alm::Matrix{Complex{Float64}}, s::Int; init)
+function spinsph_mapreduce(op, f, alm::AbstractMatrix, s::Int; init)
     N, M = size(alm)
     lmax = sph_lmax(N)
     r = init
@@ -46,8 +46,9 @@ pseudo-spectral fast flow of Gundlach, arXiv:gr-qc/9707050.
 
 The candidate surface is parameterised as the level set
 `F(x) = |x − origin| − h(θ, φ) = 0`, with `(θ, φ)` measured from `origin`. The
-shape function `h` is expanded in spin-0 spherical harmonics (`hlm`, complex
-layout though `h` is real). At each iteration:
+shape function `h` is expanded in real spin-0 spherical harmonics (`hlm` is
+stored as `Matrix{Float64}` in FastSphericalHarmonics' real-array layout). At
+each iteration:
 
 1. The expansion `H = D_i s^i + K_{ij} s^i s^j − K` is evaluated on the
    surface, with the principal-symbol weight `ρ` from eq. (28) of the paper
@@ -64,9 +65,9 @@ layout though `h` is real). At each iteration:
   local ADM data at the Cartesian point `x`.
 - `origin::SVector{3,Float64}`: initial parametrisation origin. Must lie
   inside the star-shaped candidate surface.
-- `hlm::Matrix{Complex{Float64}}`, size `(N, 2N-1)`: initial spin-0 spinsph
-  coefficients of `h(θ, φ)`. The second signature builds this from a sphere of
-  radius `r > 0` at angular resolution `N`.
+- `hlm::Matrix{Float64}`, size `(N, 2N-1)`: initial spin-0 real-array spinsph
+  coefficients of `h(θ, φ)`. The second signature builds this from a sphere
+  of radius `r > 0` at angular resolution `N`.
 - `atol::Float64`: convergence threshold on the L² norm of the (`ρ`-weighted)
   expansion.
 - `maxiters::Int`: hard cap on iterations.
@@ -76,7 +77,7 @@ NamedTuple `(; origin, hlm)`: the final recentred origin and converged spin-0
 spinsph coefficients of `h`. The Cartesian horizon points recover as
 `origin + h(θ,φ) · r̂(θ,φ)`.
 """
-function find_horizon(admvars, origin::SVector{3,Float64}, hlm::Matrix{Complex{Float64}}, atol::Float64, maxiters::Int)
+function find_horizon(admvars, origin::SVector{3,Float64}, hlm::Matrix{Float64}, atol::Float64, maxiters::Int)
     N, M = size(hlm)
     @assert M == 2N - 1
 
@@ -86,8 +87,6 @@ function find_horizon(admvars, origin::SVector{3,Float64}, hlm::Matrix{Complex{F
     lmax = sph_lmax(N)          # N-1
     @assert lmax >= 1
 
-    # Keep hlm in the spin-0 complex layout (although it is real-valued) so the eth/ethbar chain is uniform
-
     # Fast flow
     α = 1.0
     β = 0.5
@@ -95,7 +94,10 @@ function find_horizon(admvars, origin::SVector{3,Float64}, hlm::Matrix{Complex{F
         Hlm = expansion(admvars, origin, hlm; modification=:ρ)
 
         h00 = hlm[spinsph_mode(0, 0, 0)]
-        h_avg = real(h00) / sqrt(4π)               # mean = ∫h dΩ / 4π
+        h_avg = h00 / sqrt(4π)                     # mean = ∫h dΩ / 4π
+
+        # Quadrupole magnitude
+        h2_norm = sqrt(sum(abs2(hlm[spinsph_mode(0, 2, m)]) for m in -2:+2))
 
         h1lm = copy(hlm)
         h1lm[spinsph_mode(0, 0, 0)] = 0
@@ -103,42 +105,52 @@ function find_horizon(admvars, origin::SVector{3,Float64}, hlm::Matrix{Complex{F
 
         H_norm = sqrt(spinsph_mapreduce(+, abs2, Hlm, 0; init=0.0))
 
-        @printf("iter: %4d   ⟨h⟩: %6.3f   |h-⟨h⟩|: %9.3e   |H|: %9.3e   x₀: (%+.3f, %+.3f, %+.3f)\n",
-                iter, h_avg, h1_norm, H_norm, origin[1], origin[2], origin[3])
-        (iter == maxiters || H_norm < atol) && break
+        @printf(
+            "iter: %4d   ⟨h⟩: %6.3f   |h-⟨h⟩|: %9.3e   |hₗ₌₂|: %9.3e   |H|: %9.3e   x₀: (%+.3f, %+.3f, %+.3f)\n",
+            iter,
+            h_avg,
+            h1_norm,
+            h2_norm,
+            H_norm,
+            origin[1],
+            origin[2],
+            origin[3]
+        )
+        H_norm < atol && return (; success=true, iter, origin, hlm)
+        (iter == maxiters || h_avg < 1.0e-6) && return (; success=false, iter, origin, hlm)
 
         A = α / (lmax * (lmax+1)) + β
         B = β / α
-        ρ = 1                   # (28)
         for l in 0:lmax, m in (-l):(+l)
             i = spinsph_mode(0, l, m)
-            hlm[i] = hlm[i] - A / (1 + B * l * (l+1)) * (ρ * Hlm[i])
+            hlm[i] = hlm[i] - A / (1 + B * l * (l+1)) * Hlm[i]
         end
 
         # Recenter: move origin to absorb the l=1 dipole of h.
-        # For h ≈ R + d·r̂ (sphere of radius R centered at origin+d), the centroid
-        # displacement is d = 3⟨h r̂⟩, expressed via the l=1 spinsph coefficients.
+        # In FSH's real-array (real-SH) storage with Y_{l,m} normalised so that
+        # ⟨r̂_x⟩ = √(4π/3) Y_{1,+1}, ⟨r̂_y⟩ = √(4π/3) Y_{1,-1}, ⟨r̂_z⟩ = √(4π/3) Y_{1,0},
+        # the centroid offset is d_i = 3 ⟨h r̂_i⟩ = √(3/(4π)) · h_{1,*}.
         h1m1 = hlm[spinsph_mode(0, 1, -1)]
-        h10  = hlm[spinsph_mode(0, 1,  0)]
+        h10 = hlm[spinsph_mode(0, 1, 0)]
         h1p1 = hlm[spinsph_mode(0, 1, +1)]
-        Δx = real(h1m1 - h1p1) * sqrt(3 / (8π))
-        Δy = real(-im * (h1m1 + h1p1)) * sqrt(3 / (8π))
-        Δz = real(h10) * sqrt(3 / (4π))
+        Δx = h1p1 * sqrt(3 / (4π))
+        Δy = h1m1 * sqrt(3 / (4π))
+        Δz = h10 * sqrt(3 / (4π))
         origin = origin + SVector{3}(Δx, Δy, Δz)
         # Linear approximation: subtract the dipole component from h.
         hlm[spinsph_mode(0, 1, -1)] = 0
-        hlm[spinsph_mode(0, 1,  0)] = 0
+        hlm[spinsph_mode(0, 1, 0)] = 0
         hlm[spinsph_mode(0, 1, +1)] = 0
     end
 
-    return (; origin, hlm)
+    @assert false
 end
 
 function find_horizon(admvars, origin::SVector{3,Float64}, N::Int, r::Float64, atol::Float64, maxiters::Int)
     @assert N > 0
     @assert r > 0
     M = 2N - 1
-    h = fill(complex(float(r)), N, M)
+    h = fill(float(r), N, M)
     hlm = spinsph_transform(h, 0)
     return find_horizon(admvars, origin, hlm, atol, maxiters)
 end
@@ -146,7 +158,7 @@ end
 export horizon_points
 """
     horizon_points(origin::SVector{3,Float64},
-                   hlm::Matrix{Complex{Float64}}) -> Matrix{SVector{3,Float64}}
+                   hlm::Matrix{Float64}) -> Matrix{SVector{3,Float64}}
     horizon_points(result) -> Matrix{SVector{3,Float64}}
 
 Reconstruct the Cartesian points of the horizon surface on its `(θ, φ)`
@@ -157,10 +169,10 @@ where `h` is evaluated from `hlm` and
 
 The second form accepts the `NamedTuple` returned by [`find_horizon`](@ref).
 """
-function horizon_points(origin::SVector{3,Float64}, hlm::Matrix{Complex{Float64}})
+function horizon_points(origin::SVector{3,Float64}, hlm::Matrix{Float64})
     N, M = size(hlm)
     @assert M == 2N - 1
-    h = real.(spinsph_evaluate(hlm, 0))
+    h = spinsph_evaluate(hlm, 0)
     θgrid, φgrid = sph_points(N)
     pts = Matrix{SVector{3,Float64}}(undef, N, M)
     for j in 1:M, i in 1:N
@@ -173,40 +185,87 @@ function horizon_points(origin::SVector{3,Float64}, hlm::Matrix{Complex{Float64}
 end
 horizon_points(result::NamedTuple) = horizon_points(result.origin, result.hlm)
 
-function expansion(admvars, origin::SVector{3}, hlm::Matrix{Complex{Float64}}; modification=nothing)
+export horizon_grid
+"""
+    horizon_grid(N::Int) -> (θ, φ)
+
+Return the `(θ_i, φ_j)` collocation grid that [`find_horizon`](@ref),
+[`horizon_points`](@ref), and [`horizon_shape`](@ref) operate on at angular
+resolution `N`. The result is the tuple returned by
+`FastSphericalHarmonics.sph_points(N)`: `θ` has length `N`, `φ` has length
+`2N − 1`.
+
+Typical usage to seed [`find_horizon`](@ref) with an explicit shape:
+
+    θ, φ = horizon_grid(N)
+    r = [my_shape(θ[i], φ[j]) for i in 1:length(θ), j in 1:length(φ)]
+    hlm = horizon_shape(r)
+"""
+horizon_grid(N::Int) = sph_points(N)
+
+export horizon_shape
+"""
+    horizon_shape(r::AbstractMatrix{<:Real}) -> Matrix{Float64}
+
+Transform the radial distances `r[i, j] = h(θ_i, φ_j)` sampled on the
+[`horizon_grid`](@ref) into the corresponding spin-0 real-spinsph coefficients,
+suitable as the `hlm` argument of [`find_horizon`](@ref). The input must have
+size `(N, 2N − 1)` matching `horizon_grid(N)`.
+
+This is the inverse of evaluating `h(θ, φ)` from `hlm`; together with
+[`horizon_points`](@ref) it provides a round trip
+`r → hlm → points = origin + r · r̂`.
+"""
+function horizon_shape(r::AbstractMatrix{<:Real})
+    N, M = size(r)
+    @assert M == 2N - 1
+    return spinsph_transform(Matrix{Float64}(r), 0)
+end
+
+function expansion(admvars, origin::SVector{3}, hlm::Matrix{Float64}; modification=nothing)
     N, M = size(hlm)
 
-    # Spectral derivatives
-    ðhlm = spinsph_eth(hlm, 0)     # spin-1 coefficients of ðh
-    ð²hlm = spinsph_eth(ðhlm, 1)   # spin-2 coefficients of ð²h
-    Δhlm = spinsph_ethbar(ðhlm, 1) # spin-0 coefficients of Δ_S h
+    # FSH real-array conventions: for spin-0 input `f`, `spinsph_eth(_, 0)`
+    # returns SVector{2} coefficients of the spin-1 quantity ðf, and
+    # `spinsph_evaluate(_, 1)` gives its grid values as SVector{2}, where
+    # ðf|_{grid}[1] = -∂_θ f  and  ðf|_{grid}[2] = -(1/sinθ) ∂_φ f
+    # (the analytic ð = -[∂_θ + (i/sinθ) ∂_φ]; the m<0 sign-flip seen in the
+    # complex-array path is absorbed into this real-array storage).
+    ðhlm = spinsph_eth(hlm, 0)      # spin-1 coefficients
+    Δhlm = spinsph_ethbar(ðhlm, 1)  # ð̄ð h = Δ_S h, back to spin 0
 
     # Grid synthesis
-    h = real.(spinsph_evaluate(hlm, 0))
+    h = spinsph_evaluate(hlm, 0)
     ðh = spinsph_evaluate(ðhlm, 1)
-    ð²h = spinsph_evaluate(ð²hlm, 2)
-    Δh = real.(spinsph_evaluate(Δhlm, 0))
+    Δh = spinsph_evaluate(Δhlm, 0)
 
-    # Orthonormal-frame surface gradient and Hessian of h
-    v_θ̂ = real.(ðh)             # ∂_θ h
-    v_φ̂ = imag.(ðh)             # (1/sinθ) ∂_φ h
-    Hθθ = (Δh + real.(ð²h)) / 2 # ∇_θ̂ ∇_θ̂ h
-    Hφφ = (Δh - real.(ð²h)) / 2 # ∇_φ̂ ∇_φ̂ h
-    Hθφ = imag.(ð²h) / 2        # ∇_θ̂ ∇_φ̂ h
+    # Orthonormal-frame surface gradient (flip sign of the FSH minus convention).
+    v_θ̂ = [-ðh[i, j][1] for i in 1:N, j in 1:M]   # ∂_θ h
+    v_φ̂ = [-ðh[i, j][2] for i in 1:N, j in 1:M]   # (1/sinθ) ∂_φ h
 
-    # Expansion H at each collocation point
+    # Second derivatives. FSH's real-array storage does not support spin 2, so
+    # instead of going through ð²h we treat v_θ̂ and v_φ̂ as new spin-0 scalars
+    # and apply ð once more — this stays inside the validated spin-0 / spin-1
+    # path. The orthonormal-frame Hessian of h is then
+    #   H_{θ̂θ̂} = ∂²_θ h                = -ðv_θ̂[1]
+    #   H_{φ̂φ̂} = (1/sin²θ) ∂²_φ h + cotθ ∂_θ h = Δh - H_{θ̂θ̂}   (trace identity)
+    #   H_{θ̂φ̂} = (1/sinθ) ∂_θ ∂_φ h - cotθ v_φ̂  = -ðv_φ̂[1]
+    ðvθ = spinsph_evaluate(spinsph_eth(spinsph_transform(v_θ̂, 0), 0), 1)
+    ðvφ = spinsph_evaluate(spinsph_eth(spinsph_transform(v_φ̂, 0), 0), 1)
+
     θgrid, φgrid = sph_points(N)
-    H = Matrix{Complex{Float64}}(undef, N, M)
+    H = Matrix{Float64}(undef, N, M)
     for j in 1:M, i in 1:N
+        Hθθ = -ðvθ[i, j][1]
+        Hφφ = Δh[i, j] - Hθθ
+        Hθφ = -ðvφ[i, j][1]
         H[i, j] = expansion_at_point(
-            admvars, origin, θgrid[i], φgrid[j], h[i, j], v_θ̂[i, j], v_φ̂[i, j], Hθθ[i, j], Hφφ[i, j], Hθφ[i, j];
-            modification,
+            admvars, origin, θgrid[i], φgrid[j], h[i, j], v_θ̂[i, j], v_φ̂[i, j], Hθθ, Hφφ, Hθφ; modification
         )
     end
 
     Hlm = spinsph_transform(H, 0)
-
-    return Hlm::Matrix{Complex{Float64}}
+    return Hlm::Matrix{Float64}
 end
 
 # Build ∂_i F and ∂_i ∂_j F in Cartesian components at one collocation point, then
@@ -277,7 +336,7 @@ function expansion_at_point(admvars, origin::SVector{3}, θ, φ, h, vθ, vφ, H�
         # In Cartesian with origin at O: ḡ_{ab} = δ_{ab}, ∇̄_a r = r̂_a, r = h on the surface.
         denom = tr(γinv) - dot(r̂, γinv * r̂) - dot(s, s) + dot(s, r̂)^2
         ρ = 2 * h^2 * Nnorm / denom
-        return ρ * H
+        H = ρ * H
     end
 
     return H

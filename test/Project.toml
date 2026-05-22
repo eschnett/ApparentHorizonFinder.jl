@@ -6,5 +6,5 @@ SpacetimeMetrics = "77e61b41-605e-43a6-b70f-04b7dcd1f572"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
-[sources]
-SpacetimeMetrics = {url = "https://github.com/eschnett/SpacetimeMetrics.jl"}
+[compat]
+SpacetimeMetrics = "1.1.0"

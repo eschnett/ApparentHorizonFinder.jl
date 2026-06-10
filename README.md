@@ -3,7 +3,7 @@
 Find apparent horizons in a spacelike hypersurface.
 
 [![CI](https://github.com/eschnett/ApparentHorizonFinder.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/eschnett/ApparentHorizonFinder.jl/actions/workflows/CI.yml)
-[![Documentation](https://github.com/eschnett/ApparentHorizonFinder.jl/actions/workflows/docs.yml/badge.svg)](https://eschnett.github.io/ApparentHorizonFinder.jl/dev/)
+[![Documentation](https://github.com/eschnett/ApparentHorizonFinder.jl/actions/workflows/docs.yml/badge.svg)](https://eschnett.github.io/ApparentHorizonFinder.jl/)
 
 ## Overview
 

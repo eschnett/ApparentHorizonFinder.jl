@@ -230,8 +230,37 @@ end
     atol = 1.0e-8
     maxiters = 100
     # Horizon at r=1/2
-    success, iters, origin, hlm = find_horizon(brill_lindquist_metric, x₀, N, r, atol, maxiters)
+    success, iters, origin, hlm, area = find_horizon(brill_lindquist_metric, x₀, N, r, atol, maxiters)
     @test success
+    # Schwarzschild with M=1: proper area 16π M²
+    @test isapprox(area, 16π; rtol=1.0e-6)
+end
+
+@testset "Verbosity" begin
+    x₀ = SVector{3}(0.0, 0.0, 0.1)
+    N = 8
+    r = 1.0
+    atol = 1.0e-8
+    maxiters = 100
+    for verbosity in 0:2
+        output = let pipe = Pipe()
+            result = redirect_stdout(pipe) do
+                res = find_horizon(brill_lindquist_metric, x₀, N, r, atol, maxiters; verbosity)
+                close(Base.pipe_writer(pipe))
+                res
+            end
+            @test result.success
+            read(pipe, String)
+        end
+        nlines = count('\n', output)
+        if verbosity == 0
+            @test nlines == 0
+        elseif verbosity == 1
+            @test nlines == 1
+        else
+            @test nlines > 1
+        end
+    end
 end
 
 ################################################################################
@@ -263,9 +292,11 @@ end
                  for i in 1:length(θ), j in 1:length(φ)]
     hlm = horizon_shape(r_horizon)
     atol = 1.0e-3
-    success, iters, origin, hlm = find_horizon(kerr_schild_metric, SVector{3}(0.0, 0.0, 0.0), hlm, atol, 0)
+    success, iters, origin, hlm, area = find_horizon(kerr_schild_metric, SVector{3}(0.0, 0.0, 0.0), hlm, atol, 0)
     @test success
     @test iters == 0
+    # Kerr horizon area 4π (r₊² + a²), independent of coordinates
+    @test isapprox(area, 4π * (r_plus^2 + a^2); rtol=1.0e-8)
 end
 
 @testset "Kerr-Schild" begin
@@ -275,8 +306,13 @@ end
     atol = 1.0e-8
     maxiters = 100
     # Horizon at r=2, or inside this sphere for a>0
-    success, iters, origin, hlm = find_horizon(kerr_schild_metric, x₀, N, r, atol, maxiters)
+    success, iters, origin, hlm, area = find_horizon(kerr_schild_metric, x₀, N, r, atol, maxiters)
     @test success
+    M = 1.0
+    a = 0.8
+    r_plus = M + sqrt(M^2 - a^2)
+    # N = 8 limits the spectral accuracy of the area to ~1e-5
+    @test isapprox(area, 4π * (r_plus^2 + a^2); rtol=1.0e-4)
 end
 
 ################################################################################
@@ -318,9 +354,11 @@ end
     end
     hlm = horizon_shape(r_horizon)
     atol = 1.0e-3
-    success, iters, origin, hlm = find_horizon(rotated_kerr_schild_metric, SVector{3}(0.0, 0.0, 0.0), hlm, atol, 0)
+    success, iters, origin, hlm, area = find_horizon(rotated_kerr_schild_metric, SVector{3}(0.0, 0.0, 0.0), hlm, atol, 0)
     @test success
     @test iters == 0
+    # The proper area is invariant under the rotation
+    @test isapprox(area, 4π * (r_plus^2 + a^2); rtol=1.0e-8)
 end
 
 @testset "Rotated Kerr-Schild" begin
@@ -362,9 +400,12 @@ end
                  for i in 1:length(θ), j in 1:length(φ)]
     hlm = horizon_shape(r_horizon)
     atol = 1.0e-3
-    success, iters, origin, hlm = find_horizon(harmonic_metric, SVector{3}(0.0, 0.0, 0.0), hlm, atol, 0)
+    success, iters, origin, hlm, area = find_horizon(harmonic_metric, SVector{3}(0.0, 0.0, 0.0), hlm, atol, 0)
     @test success
     @test iters == 0
+    # Same invariant Kerr horizon area in harmonic coordinates
+    r_plus = M + sqrt(M^2 - a^2)
+    @test isapprox(area, 4π * (r_plus^2 + a^2); rtol=1.0e-8)
 end
 
 @testset "Harmonic" begin

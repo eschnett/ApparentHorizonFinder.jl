@@ -37,9 +37,10 @@ end
 
 export find_horizon
 """
-    find_horizon(admvars, origin, hlm, atol, maxiters)      -> (; origin, hlm)
-    find_horizon(admvars, origin, N::Int, r::Float64,
-                 atol, maxiters)                            -> (; origin, hlm)
+    find_horizon(admvars, origin, hlm, atol, maxiters;
+                 verbosity=1)             -> (; success, iters, origin, hlm, area)
+    find_horizon(admvars, origin, N::Int, r::Float64, atol, maxiters;
+                 verbosity=1)             -> (; success, iters, origin, hlm, area)
 
 Locate an apparent horizon (marginally outer trapped surface) by the
 pseudo-spectral fast flow of Gundlach, arXiv:gr-qc/9707050.
@@ -71,18 +72,26 @@ each iteration:
 - `atol::Float64`: convergence threshold on the L² norm of the (`ρ`-weighted)
   expansion.
 - `maxiters::Int`: hard cap on iterations.
+- `verbosity::Int = 1` (keyword): `0` prints nothing, `1` prints one summary
+  line when the iteration finishes, `2` additionally prints per-iteration
+  diagnostics.
 
 # Returns
-NamedTuple `(; origin, hlm)`: the final recentred origin and converged spin-0
-spinsph coefficients of `h`. The Cartesian horizon points recover as
+NamedTuple `(; success, iters, origin, hlm, area)`: the convergence status,
+number of iterations taken, the final recentred origin, the converged spin-0
+spinsph coefficients of `h`, and the proper area of the final surface (see
+[`horizon_area`](@ref)). The Cartesian horizon points recover as
 `origin + h(θ,φ) · r̂(θ,φ)`.
 """
-function find_horizon(admvars, origin::SVector{3,Float64}, hlm::Matrix{Float64}, atol::Float64, maxiters::Int)
+function find_horizon(
+    admvars, origin::SVector{3,Float64}, hlm::Matrix{Float64}, atol::Float64, maxiters::Int; verbosity::Int=1
+)
     N, M = size(hlm)
     @assert M == 2N - 1
 
     @assert atol >= 0
     @assert maxiters >= 0
+    @assert 0 <= verbosity <= 2
 
     lmax = sph_lmax(N)          # N-1
     @assert lmax >= 1
@@ -105,7 +114,7 @@ function find_horizon(admvars, origin::SVector{3,Float64}, hlm::Matrix{Float64},
 
         H_norm = sqrt(spinsph_mapreduce(+, abs2, Hlm, 0; init=0.0))
 
-        @printf(
+        verbosity >= 2 && @printf(
             "iter: %4d   ⟨h⟩: %6.3f   |h-⟨h⟩|: %9.3e   |hₗ₌₂|: %9.3e   |H|: %9.3e   x₀: (%+.3f, %+.3f, %+.3f)\n",
             iter,
             h_avg,
@@ -116,8 +125,22 @@ function find_horizon(admvars, origin::SVector{3,Float64}, hlm::Matrix{Float64},
             origin[2],
             origin[3]
         )
-        H_norm < atol && return (; success=true, iters=iter, origin, hlm)
-        (iter == maxiters || h_avg < 1.0e-6) && return (; success=false, iters=iter, origin, hlm)
+        if H_norm < atol || iter == maxiters || h_avg < 1.0e-6
+            success = H_norm < atol
+            area = horizon_area(admvars, origin, hlm)
+            verbosity >= 1 && @printf(
+                "find_horizon: %s after %d iterations   ⟨h⟩: %.6f   |H|: %.3e   area: %.6f   x₀: (%+.3f, %+.3f, %+.3f)\n",
+                success ? "converged" : "failed to converge",
+                iter,
+                h_avg,
+                H_norm,
+                area,
+                origin[1],
+                origin[2],
+                origin[3]
+            )
+            return (; success, iters=iter, origin, hlm, area)
+        end
 
         A = α / (lmax * (lmax+1)) + β
         B = β / α
@@ -146,13 +169,13 @@ function find_horizon(admvars, origin::SVector{3,Float64}, hlm::Matrix{Float64},
     @assert false
 end
 
-function find_horizon(admvars, origin::SVector{3,Float64}, N::Int, r::Float64, atol::Float64, maxiters::Int)
+function find_horizon(admvars, origin::SVector{3,Float64}, N::Int, r::Float64, atol::Float64, maxiters::Int; verbosity::Int=1)
     @assert N > 0
     @assert r > 0
     M = 2N - 1
     h = fill(float(r), N, M)
     hlm = spinsph_transform(h, 0)
-    return find_horizon(admvars, origin, hlm, atol, maxiters)
+    return find_horizon(admvars, origin, hlm, atol, maxiters; verbosity)
 end
 
 export horizon_points
@@ -221,6 +244,63 @@ function horizon_shape(r::AbstractMatrix{<:Real})
     @assert M == 2N - 1
     return spinsph_transform(Matrix{Float64}(r), 0)
 end
+
+export horizon_area
+"""
+    horizon_area(admvars, origin::SVector{3,Float64},
+                 hlm::Matrix{Float64}) -> Float64
+    horizon_area(admvars, result) -> Float64
+
+Compute the proper area `∮ √(det q) d²y` of the surface described by `origin`
+and `hlm`, where `q_AB` is the 2-metric induced on the surface by the spatial
+metric `γ_ij` supplied by `admvars` (see [`find_horizon`](@ref)).
+
+The surface `X(θ, φ) = origin + h(θ, φ) r̂(θ, φ)` is differentiated spectrally,
+the induced metric is sampled on the collocation grid, and the area element is
+integrated by projecting onto the `l = 0` spherical-harmonic mode, so the
+result converges spectrally with the angular resolution `N`.
+
+The second form accepts the `NamedTuple` returned by [`find_horizon`](@ref).
+"""
+function horizon_area(admvars, origin::SVector{3,Float64}, hlm::Matrix{Float64})
+    N, M = size(hlm)
+    @assert M == 2N - 1
+
+    h = spinsph_evaluate(hlm, 0)
+    # ðh: grid values are (−∂_θ h, −(1/sinθ) ∂_φ h); see `expansion`.
+    ðh_real = spinsph_evaluate(spinsph_eth(hlm, 0), 1)
+
+    θgrid, φgrid = sph_points(N)
+    # Area element per unit solid angle: f = √(det q) / sinθ, built from the
+    # orthonormal-frame tangents e_θ = ∂_θ X and e_φ̂ = (1/sinθ) ∂_φ X, which
+    # are smooth at the poles.
+    f = Matrix{Float64}(undef, N, M)
+    for j in 1:M, i in 1:N
+        sθ, cθ = sincos(θgrid[i])
+        sφ, cφ = sincos(φgrid[j])
+        r̂ = SVector(sθ * cφ, sθ * sφ, cθ)
+        θ̂ = SVector(cθ * cφ, cθ * sφ, -sθ)
+        φ̂ = SVector(-sφ, cφ, 0.0)
+
+        vθ = -ðh_real[i, j][1]          # ∂_θ h
+        vφ = -ðh_real[i, j][2]          # (1/sinθ) ∂_φ h
+        eθ = vθ * r̂ + h[i, j] * θ̂
+        eφ = vφ * r̂ + h[i, j] * φ̂
+
+        X = origin + h[i, j] * r̂
+        γ = admvars(X).γ
+
+        qθθ = dot(eθ, γ * eθ)
+        qθφ = dot(eθ, γ * eφ)
+        qφφ = dot(eφ, γ * eφ)
+        f[i, j] = sqrt(qθθ * qφφ - qθφ^2)
+    end
+
+    # ∫ f dΩ = √(4π) f₀₀ in FSH's real-array normalisation.
+    flm = spinsph_transform(f, 0)
+    return sqrt(4π) * flm[spinsph_mode(0, 0, 0)]
+end
+horizon_area(admvars, result::NamedTuple) = horizon_area(admvars, result.origin, result.hlm)
 
 function expansion(admvars, origin::SVector{3}, hlm::Matrix{Float64}; modification=nothing)
     N, M = size(hlm)

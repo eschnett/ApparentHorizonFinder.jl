@@ -37,10 +37,10 @@ end
 
 export find_horizon
 """
-    find_horizon(admvars, origin, hlm, atol, maxiters;
-                 verbosity=1)             -> (; success, iters, origin, hlm, area)
-    find_horizon(admvars, origin, N::Int, r::Float64, atol, maxiters;
-                 verbosity=1)             -> (; success, iters, origin, hlm, area)
+    find_horizon(admvars, origin, hlm, atol=0.0, maxiters=1000;
+                 verbosity=1)     -> (; success, iters, origin, hlm, area, H_norm)
+    find_horizon(admvars, origin, N::Int, r::Float64, atol=0.0, maxiters=1000;
+                 verbosity=1)     -> (; success, iters, origin, hlm, area, H_norm)
 
 Locate an apparent horizon (marginally outer trapped surface) by the
 pseudo-spectral fast flow of Gundlach, arXiv:gr-qc/9707050.
@@ -69,22 +69,39 @@ each iteration:
 - `hlm::Matrix{Float64}`, size `(N, 2N-1)`: initial spin-0 real-array spinsph
   coefficients of `h(θ, φ)`. The second signature builds this from a sphere
   of radius `r > 0` at angular resolution `N`.
-- `atol::Float64`: convergence threshold on the L² norm of the (`ρ`-weighted)
-  expansion.
-- `maxiters::Int`: hard cap on iterations.
+- `atol::Float64 = 0.0`: convergence threshold on the L² norm of the
+  (`ρ`-weighted) expansion. The default `atol = 0` iterates until the residual
+  stops improving, i.e. down to the round-off floor; a positive value stops
+  the iteration early once `|H| < atol`.
+- `maxiters::Int = 1000`: hard cap on iterations.
 - `verbosity::Int = 1` (keyword): `0` prints nothing, `1` prints one summary
   line when the iteration finishes, `2` additionally prints per-iteration
   diagnostics.
 
 # Returns
-NamedTuple `(; success, iters, origin, hlm, area)`: the convergence status,
-number of iterations taken, the final recentred origin, the converged spin-0
-spinsph coefficients of `h`, and the proper area of the final surface (see
-[`horizon_area`](@ref)). The Cartesian horizon points recover as
+NamedTuple `(; success, iters, origin, hlm, area, H_norm)`: the convergence
+status, number of iterations taken, the final recentred origin, the converged
+spin-0 spinsph coefficients of `h`, the proper area of the final surface (see
+[`horizon_area`](@ref)), and the final residual (the L² norm of the
+`ρ`-weighted expansion). The Cartesian horizon points recover as
 `origin + h(θ,φ) · r̂(θ,φ)`.
+
+# Convergence
+The fast flow converges linearly and monotonically: the contraction factor per
+iteration depends on the spacetime (the deviation of the true linearised
+expansion from the flat-space model built into the flow; e.g. ≈ 0.5 for
+Schwarzschild, ≈ 0.67 for Kerr `a = 0.8`, ≈ 0.91 for `a = 0.99`) but not on
+the resolution `N`. The residual `|H|` bottoms out at a round-off floor of
+roughly `lmax² · eps` (≈ 1e-13), at which point the surface itself is accurate
+to ≈ 1e-15 provided `N` resolves it; the floor is detected by stalled progress
+(no 1% improvement over three consecutive iterations). Running to the floor
+costs at most about twice as many iterations as `atol = 1e-8`. With `atol = 0`
+the iteration succeeds when it reaches this floor; with `atol > 0` reaching
+the floor first means the requested tolerance is unachievable at this
+resolution and `success` is `false`.
 """
 function find_horizon(
-    admvars, origin::SVector{3,Float64}, hlm::Matrix{Float64}, atol::Float64, maxiters::Int; verbosity::Int=1
+    admvars, origin::SVector{3,Float64}, hlm::Matrix{Float64}, atol::Float64=0.0, maxiters::Int=1000; verbosity::Int=1
 )
     N, M = size(hlm)
     @assert M == 2N - 1
@@ -99,6 +116,8 @@ function find_horizon(
     # Fast flow
     α = 1.0
     β = 0.5
+    H_best = Inf
+    stall = 0
     for iter in 0:maxiters
         Hlm = expansion(admvars, origin, hlm; modification=:ρ)
 
@@ -114,6 +133,13 @@ function find_horizon(
 
         H_norm = sqrt(spinsph_mapreduce(+, abs2, Hlm, 0; init=0.0))
 
+        # Stall detection: the flow converges linearly (typically by ≥ 9% per
+        # iteration even for near-extremal Kerr), so three consecutive
+        # iterations that fail to improve the best residual by at least 1%
+        # signal the round-off (or truncation) floor.
+        stall = H_norm < 0.99 * H_best ? 0 : stall + 1
+        H_best = min(H_best, H_norm)
+
         verbosity >= 2 && @printf(
             "iter: %4d   ⟨h⟩: %6.3f   |h-⟨h⟩|: %9.3e   |hₗ₌₂|: %9.3e   |H|: %9.3e   x₀: (%+.3f, %+.3f, %+.3f)\n",
             iter,
@@ -125,8 +151,10 @@ function find_horizon(
             origin[2],
             origin[3]
         )
-        if H_norm < atol || iter == maxiters || h_avg < 1.0e-6
-            success = H_norm < atol
+        if (atol > 0 && H_norm < atol) || stall >= 3 || iter == maxiters || h_avg < 1.0e-6
+            # With atol = 0, stalling at the floor is the goal; with atol > 0
+            # it means the requested tolerance is unachievable.
+            success = atol > 0 ? H_norm < atol : stall >= 3
             area = horizon_area(admvars, origin, hlm)
             verbosity >= 1 && @printf(
                 "find_horizon: %s after %d iterations   ⟨h⟩: %.6f   |H|: %.3e   area: %.6f   x₀: (%+.3f, %+.3f, %+.3f)\n",
@@ -139,7 +167,7 @@ function find_horizon(
                 origin[2],
                 origin[3]
             )
-            return (; success, iters=iter, origin, hlm, area)
+            return (; success, iters=iter, origin, hlm, area, H_norm)
         end
 
         A = α / (lmax * (lmax+1)) + β
@@ -169,7 +197,7 @@ function find_horizon(
     @assert false
 end
 
-function find_horizon(admvars, origin::SVector{3,Float64}, N::Int, r::Float64, atol::Float64, maxiters::Int; verbosity::Int=1)
+function find_horizon(admvars, origin::SVector{3,Float64}, N::Int, r::Float64, atol::Float64=0.0, maxiters::Int=1000; verbosity::Int=1)
     @assert N > 0
     @assert r > 0
     M = 2N - 1

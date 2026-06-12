@@ -315,6 +315,29 @@ end
     @test isapprox(area, 4π * (r_plus^2 + a^2); rtol=1.0e-4)
 end
 
+@testset "Kerr-Schild to round-off" begin
+    # With the default atol = 0 the flow runs to the round-off floor
+    # (|H| ~ lmax² eps). The area is then limited only by the spectral
+    # truncation of the surface, ~1e-10 at N = 16.
+    x₀ = SVector{3}(0.0, 0.0, 0.1)
+    N = 16
+    r = 2.0
+    result = find_horizon(kerr_schild_metric, x₀, N, r)
+    @test result.success
+    @test result.H_norm < 1.0e-11
+    M = 1.0
+    a = 0.8
+    r_plus = M + sqrt(M^2 - a^2)
+    @test isapprox(result.area, 4π * (r_plus^2 + a^2); rtol=1.0e-9)
+
+    # A tolerance below the round-off floor is unachievable: the stall
+    # detector must stop the iteration long before maxiters.
+    result = find_horizon(kerr_schild_metric, x₀, N, r, 1.0e-15, 1000)
+    @test !result.success
+    @test result.iters < 200
+    @test result.H_norm < 1.0e-11
+end
+
 ################################################################################
 
 # Kerr-Schild with M=1, a=0.6, spin axis tilted 30° from ẑ via SpacetimeMetrics.rotate.

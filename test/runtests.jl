@@ -1,151 +1,84 @@
+using AbstractSphericalHarmonics
 using ApparentHorizonFinder
-using FastSphericalHarmonics
 using ForwardDiff
+using LinearAlgebra: dot
 using SpacetimeMetrics
 using StaticArrays
 using Test
+import SSHT                     # second backend (DriscollHealyGrid)
 
 const δ = SMatrix{3,3}(1, 0, 0, 0, 1, 0, 0, 0, 1)
 
 ################################################################################
-# FastSphericalHarmonics complex-API sign / phase conventions used by the
-# horizon finder. These tests pin the conventions down so that the
-# complex spin-0 → spin-1 → spin-2 path used by `expansion` stays correct
-# under future FSH releases.
+# Spherical-harmonic conventions used by the horizon finder, via the
+# AbstractSphericalHarmonics interface (canonical/Wikipedia conventions; the
+# backend-specific phase differences are reconciled inside ASH's extensions).
+# These tests pin down the spin-0 → spin-1 → spin-2 eth chain that
+# `expansion` relies on:
 #
-# Summary of conventions, derived from FSH's source plus the tests below:
-#
-#  Spin-0 normalisation
-#  ────────────────────
-#  `spinsph_evaluate(C, 0)` returns Σ_{lm} C_{lm} Y_{lm}(θ,φ) where the
-#  scalar spherical harmonics use the convention WITHOUT Condon-Shortley
-#  phase. In particular Y_{1,0}(θ,φ) = √(3/4π) cosθ.
-#
-#  ð on a real scalar (textbook reference)
-#  ───────────────────────────────────────
-#  The TEXTBOOK Goldberg-Penrose action on a spin-0 scalar f is
-#       (ð f)(θ,φ) = −[∂_θ + (i/sinθ) ∂_φ] f.
-#  FSH's complex spin-1 GRID value of `spinsph_evaluate(spinsph_eth(C,0),1)`
-#  reproduces this TEXTBOOK action only for modes with m ≥ 0; for m < 0
-#  the FSH spin-1 grid value is the textbook value with a SIGN flip.
-#  (This is the same flip that the real-array path applies internally; the
-#  complex path does NOT apply it, leaving FSH's internal ₁Y_{l,m}
-#  representation directly visible.) Because the gradient enters the
-#  expansion as a vector (v_θ̂, v_φ̂), the cleanest workaround is to leave
-#  the complex spin-1 grid as-is and use the existing real-array
-#  ðh helper for the gradient (it already absorbs the flip).
-#
-#  ð̄ð on spin-0 is the Laplacian on the unit sphere with eigenvalue −l(l+1),
-#  so Δh can be computed in spin-0 coefficient space by multiplying h_{lm}
-#  by −l(l+1).
-#
-#  ð² on a real scalar
-#  ───────────────────
-#  Chaining `spinsph_eth(_, 0)` then `spinsph_eth(_, 1)` on the complex
-#  spin-0 coefficients gives spin-2 coefficients whose grid evaluation
-#  EQUALS the textbook spin-2 grid quantity
-#       (ð² h)(θ,φ) = (H_{θ̂θ̂} − H_{φ̂φ̂}) + 2 i H_{θ̂φ̂}
-#  for every m EXCEPT m = −1, where it has the opposite sign. The fix is
-#  to multiply column 2 of the spin-2 coefficient array (which stores the
-#  m = −1 mode for every l) by −1 before calling `spinsph_evaluate(_, 2)`.
-#  (No other m needs a correction; this was checked across l up to 8.)
-#
-#  Combining the trace identity Δh = H_{θ̂θ̂} + H_{φ̂φ̂} with the two pieces
-#  of the corrected ð²h gives the orthonormal-frame Hessian:
-#       Hθθ = (Δh + Re ð²h) / 2
-#       Hφφ = (Δh − Re ð²h) / 2
-#       Hθφ =  Im ð²h / 2
+#   ðf            = −[∂_θ + (i/sinθ) ∂_φ] f                  (spin 0 → 1)
+#   ð̄ð f          = Δf, eigenvalue −l(l+1)
+#   ð²f           = (H_θ̂θ̂ − H_φ̂φ̂) + 2i H_θ̂φ̂                  (spin 0 → 2)
+# with the orthonormal-frame Hessian
+#   H_θ̂θ̂ = ∂²_θ f,
+#   H_φ̂φ̂ = (1/sin²θ) ∂²_φ f + cotθ ∂_θ f,
+#   H_θ̂φ̂ = (1/sinθ) ∂_θ∂_φ f − (cotθ/sinθ) ∂_φ f,
+# so that Δf = H_θ̂θ̂ + H_φ̂φ̂ recovers the full Hessian from ðf, ð²f.
+# They run on both backends.
 
-@testset "FSH complex spin-0 normalisation: Y_{1,0}" begin
-    N = 16
-    θ, φ = sph_points(N)
-    C = zeros(ComplexF64, N, 2N - 1)
-    C[spinsph_mode(0, 1, 0)] = 1.0
-    F = spinsph_evaluate(C, 0)
-    expected = [sqrt(3 / (4π)) * cos(θ[i]) + 0im for i in 1:length(θ), j in 1:length(φ)]
+grids16 = (EquiangularGrid(15), DriscollHealyGrid(15))
+
+@testset "Y_{1,0} normalisation: $(typeof(grid))" for grid in grids16
+    C = zeros(ComplexF64, ash_nmodes(grid))
+    C[ash_mode_index(grid, 0, 1, 0)] = 1.0
+    F = ash_evaluate(grid, C, 0)
+    expected = [sqrt(3 / (4π)) * cos(ash_point_coord(grid, ij)[1]) + 0im for ij in CartesianIndices(ash_grid_size(grid))]
     @test maximum(abs.(F .- expected)) < 1e-13
 end
 
-@testset "ð on Y_{1,0} (m=0): −∂_θ Y_{1,0} = √(3/4π) sinθ on grid" begin
-    # For m = 0 modes the FSH complex spin-1 grid value coincides with the
-    # textbook action of ð on the scalar; no sign correction needed.
-    N = 16
-    θ, φ = sph_points(N)
-    C = zeros(ComplexF64, N, 2N - 1)
-    C[spinsph_mode(0, 1, 0)] = 1.0
-    ðF = spinsph_evaluate(spinsph_eth(C, 0), 1)
-    expected = [sqrt(3 / (4π)) * sin(θ[i]) + 0im for i in 1:length(θ), j in 1:length(φ)]
+@testset "ð on Y_{1,0}: −∂_θ Y_{1,0} = √(3/4π) sinθ: $(typeof(grid))" for grid in grids16
+    C = zeros(ComplexF64, ash_nmodes(grid))
+    C[ash_mode_index(grid, 0, 1, 0)] = 1.0
+    ðF = ash_evaluate(grid, ash_eth(grid, C, 0), 1)
+    expected = [sqrt(3 / (4π)) * sin(ash_point_coord(grid, ij)[1]) + 0im for ij in CartesianIndices(ash_grid_size(grid))]
     @test maximum(abs.(ðF .- expected)) < 1e-13
 end
 
 @testset "ð̄ð on spin-0 has eigenvalue −l(l+1)" begin
-    N = 8
-    C = zeros(ComplexF64, N, 2N - 1)
+    grid = EquiangularGrid(7)
+    C = zeros(ComplexF64, ash_nmodes(grid))
     for (l, m) in ((1, 0), (2, +1), (2, -1), (3, +2), (3, -2), (4, 0))
         C .= 0
-        C[spinsph_mode(0, l, m)] = 1.0
-        Δlm = spinsph_ethbar(spinsph_eth(C, 0), 1)
-        @test isapprox(Δlm[spinsph_mode(0, l, m)], -l * (l + 1); atol=1e-12)
+        C[ash_mode_index(grid, 0, l, m)] = 1.0
+        Δlm = ash_ethbar(grid, ash_eth(grid, C, 0), 1)
+        @test isapprox(Δlm[ash_mode_index(grid, 0, l, m)], -l * (l + 1); atol=1e-12)
     end
 end
 
-@testset "ð² on Y_{2,0}: closed-form match (no m = −1 fix needed)" begin
+@testset "ð² on Y_{2,0}: closed-form match: $(typeof(grid))" for grid in grids16
     # f = √(5/16π) (3cos²θ − 1); m=0 so the (i/sinθ)∂_φ pieces vanish and
     # the spin-2 grid value reduces to ∂²_θ f − cotθ ∂_θ f.
-    N = 16
-    θ, φ = sph_points(N)
-    C = zeros(ComplexF64, N, 2N - 1)
-    C[spinsph_mode(0, 2, 0)] = 1.0
-    ð2F = spinsph_evaluate(spinsph_eth(spinsph_eth(C, 0), 1), 2)
+    C = zeros(ComplexF64, ash_nmodes(grid))
+    C[ash_mode_index(grid, 0, 2, 0)] = 1.0
+    ð2F = ash_evaluate(grid, ash_eth(grid, ash_eth(grid, C, 0), 1), 2)
     f(θ) = sqrt(5 / (16π)) * (3 * cos(θ)^2 - 1)
     ∂θf(θ) = ForwardDiff.derivative(f, θ)
     ∂2θf(θ) = ForwardDiff.derivative(∂θf, θ)
-    expected = [(∂2θf(θ[i]) - cot(θ[i]) * ∂θf(θ[i])) + 0im for i in 1:length(θ), j in 1:length(φ)]
+    expected = [(∂2θf(θ) - cot(θ) * ∂θf(θ)) + 0im for (θ, _) in (ash_point_coord(grid, ij) for ij in CartesianIndices(ash_grid_size(grid)))]
+    expected = reshape(expected, ash_grid_size(grid))
     @test maximum(abs.(ð2F .- expected)) < 1e-12
 end
 
-@testset "ð² m = −1 fix: column-2 sign flip recovers textbook spin-2 grid" begin
-    # For a single Y_{l,-1} input, the eth-chain spin-2 grid value differs
-    # from the textbook (Hθθ − Hφφ) + 2i Hθφ by exactly −1. Multiplying
-    # column 2 of the spin-2 coefficient array by −1 restores agreement.
-    # We verify both the necessity (without the fix it fails) and the
-    # sufficiency (with the fix it matches to machine precision) on Y_{2,-1}.
-    function Y2m1(θ, φ)
-        +sqrt(15 / (8π)) * sin(θ) * cos(θ) * cis(-φ)
-    end
-    N = 32
-    θg, φg = sph_points(N)
-    C = zeros(ComplexF64, N, 2N - 1)
-    C[spinsph_mode(0, 2, -1)] = 1.0
-    Cs2 = spinsph_eth(spinsph_eth(C, 0), 1)
-    no_fix = spinsph_evaluate(copy(Cs2), 2)
-    Cs2[:, 2] .*= -1
-    fixed = spinsph_evaluate(Cs2, 2)
-    i, j = 8, 5
-    θ, φ = θg[i], φg[j]
-    ∂θY  = ForwardDiff.derivative(t -> Y2m1(t, φ), θ)
-    ∂φY  = ForwardDiff.derivative(p -> Y2m1(θ, p), φ)
-    ∂2θY = ForwardDiff.derivative(t -> ForwardDiff.derivative(t -> Y2m1(t, φ), t), θ)
-    ∂2φY = ForwardDiff.derivative(p -> ForwardDiff.derivative(p -> Y2m1(θ, p), p), φ)
-    ∂θ∂φY = ForwardDiff.derivative(τ -> ForwardDiff.derivative(p -> Y2m1(τ, p), φ), θ)
-    sθ, cθ = sincos(θ)
-    Hθθ = ∂2θY
-    Hφφ = ∂2φY / sθ^2 + (cθ / sθ) * ∂θY
-    Hθφ = ∂θ∂φY / sθ - (cθ / sθ) * (∂φY / sθ)
-    textbook = (Hθθ - Hφφ) + 2im * Hθφ
-    @test isapprox(no_fix[i, j], -textbook; atol=1e-12)
-    @test isapprox(fixed[i, j], textbook; atol=1e-12)
-end
-
-@testset "Hessian recovery from ð, ð² (with m=-1 fix): matches ForwardDiff" begin
+@testset "Hessian recovery from ð, ð²: matches ForwardDiff: $(typeof(grid))" for grid in
+                                                                                  (EquiangularGrid(63), DriscollHealyGrid(63))
     # End-to-end check: take a smooth non-axisymmetric scalar h(θ,φ) (the
     # rotated oblate-spheroid radius, which has rich m ≠ 0 content), and
     # confirm that the recovery formulas
     #   Hθθ = (Δh + Re ð²h) / 2,
     #   Hφφ = (Δh − Re ð²h) / 2,
     #   Hθφ =  Im ð²h / 2
-    # — with column-2 sign flip on the spin-2 coefficients — match analytic
-    # ForwardDiff differentiation everywhere on the grid.
+    # match analytic ForwardDiff differentiation everywhere on the grid.
+    # (No backend-specific sign fixes — ASH's extensions reconcile them.)
     M, a, α = 1.0, 0.8, π / 6
     r_plus = M + sqrt(M^2 - a^2)
     sα, cα = sincos(α)
@@ -155,28 +88,25 @@ end
         1 / sqrt(sθold² / (r_plus^2 + a^2) + cθold^2 / r_plus^2)
     end
 
-    N = 64
-    θgrid, φgrid = sph_points(N)
-    h_grid = [h(θgrid[i], φgrid[j]) + 0im for i in 1:length(θgrid), j in 1:length(φgrid)]
-    hlm_c = spinsph_transform(h_grid, 0)
+    sz = ash_grid_size(grid)
+    h_grid = [h(ash_point_coord(grid, ij)...) + 0im for ij in CartesianIndices(sz)]
+    hlm = ash_transform(grid, h_grid, 0)
 
     # Δh via the spin-0 eigenvalue
-    Δhlm = copy(hlm_c)
-    for l in 0:N-1, m in -l:l
-        Δhlm[spinsph_mode(0, l, m)] *= -l * (l + 1)
+    Δhlm = copy(hlm)
+    for l in 0:ash_lmax(grid), m in -l:l
+        Δhlm[ash_mode_index(grid, 0, l, m)] *= -l * (l + 1)
     end
-    Δh_g = real.(spinsph_evaluate(Δhlm, 0))
+    Δh_g = real.(ash_evaluate(grid, Δhlm, 0))
 
-    # ð²h via the complex eth chain + m = −1 column fix
-    ð2h_c = spinsph_eth(spinsph_eth(hlm_c, 0), 1)
-    ð2h_c[:, 2] .*= -1
-    ð2h_g = spinsph_evaluate(ð2h_c, 2)
+    # ð²h via the eth chain
+    ð2h_g = ash_evaluate(grid, ash_eth(grid, ash_eth(grid, hlm, 0), 1), 2)
 
     max_err_θθ = 0.0
     max_err_φφ = 0.0
     max_err_θφ = 0.0
-    for j in 1:size(h_grid, 2), i in 1:size(h_grid, 1)
-        θ, φ = θgrid[i], φgrid[j]
+    for ij in CartesianIndices(sz)
+        θ, φ = ash_point_coord(grid, ij)
         ∂θh = ForwardDiff.derivative(t -> h(t, φ), θ)
         ∂φh = ForwardDiff.derivative(p -> h(θ, p), φ)
         ∂2θh = ForwardDiff.derivative(t -> ForwardDiff.derivative(t -> h(t, φ), t), θ)
@@ -186,9 +116,9 @@ end
         Hθθ_an = ∂2θh
         Hφφ_an = ∂2φh / sθ^2 + (cθ / sθ) * ∂θh
         Hθφ_an = ∂θ∂φh / sθ - (cθ / sθ) * (∂φh / sθ)
-        Hθθ_sp = (Δh_g[i, j] + real(ð2h_g[i, j])) / 2
-        Hφφ_sp = (Δh_g[i, j] - real(ð2h_g[i, j])) / 2
-        Hθφ_sp = imag(ð2h_g[i, j]) / 2
+        Hθθ_sp = (Δh_g[ij] + real(ð2h_g[ij])) / 2
+        Hφφ_sp = (Δh_g[ij] - real(ð2h_g[ij])) / 2
+        Hθφ_sp = imag(ð2h_g[ij]) / 2
         max_err_θθ = max(max_err_θθ, abs(Hθθ_sp - Hθθ_an))
         max_err_φφ = max(max_err_φφ, abs(Hφφ_sp - Hφφ_an))
         max_err_θφ = max(max_err_θφ, abs(Hθφ_sp - Hθφ_an))
@@ -198,7 +128,45 @@ end
     @test max_err_θφ < 1e-9
 end
 
-################################################################################
+@testset "Dipole extraction (recentring convention)" begin
+    # h = c + d⃗·r̂: the l=1 coefficients must reproduce d⃗ via
+    # d_x = −√(3/2π) Re c₁₁, d_y = √(3/2π) Im c₁₁, d_z = √(3/4π) Re c₁₀.
+    grid = EquiangularGrid(7)
+    d = SVector(0.3, -0.2, 0.5)
+    r = [begin
+             θ, φ = ash_point_coord(grid, ij)
+             r̂ = SVector(sin(θ) * cos(φ), sin(θ) * sin(φ), cos(θ))
+             2.0 + dot(d, r̂)
+         end for ij in CartesianIndices(ash_grid_size(grid))]
+    hlm = horizon_shape(r, grid)
+    c11 = hlm[ash_mode_index(grid, 0, 1, +1)]
+    c10 = hlm[ash_mode_index(grid, 0, 1, 0)]
+    @test isapprox(-sqrt(3 / (2π)) * real(c11), d[1]; atol=1e-13)
+    @test isapprox(+sqrt(3 / (2π)) * imag(c11), d[2]; atol=1e-13)
+    @test isapprox(+sqrt(3 / (4π)) * real(c10), d[3]; atol=1e-13)
+end
+
+@testset "horizon_points / horizon_shape round trip and resampling" begin
+    grid = EquiangularGrid(11)
+    origin = SVector(0.1, -0.2, 0.3)
+    r = [2.0 + 0.1 * cos(ash_point_coord(grid, ij)[1])^2 for ij in CartesianIndices(ash_grid_size(grid))]
+    hlm = horizon_shape(r, grid)
+    pts = horizon_points(origin, grid, hlm)
+    for ij in CartesianIndices(ash_grid_size(grid))
+        θ, φ = ash_point_coord(grid, ij)
+        r̂ = SVector(sin(θ) * cos(φ), sin(θ) * sin(φ), cos(θ))
+        @test isapprox(pts[ij], origin + r[ij] * r̂; atol=1e-12)
+    end
+    # resampling to a finer grid reproduces the analytic shape
+    result = (; success=true, iters=0, origin, hlm, area=0.0, H_norm=0.0, grid)
+    grid′ = EquiangularGrid(19)
+    pts′ = horizon_points(result, grid′)
+    for ij in CartesianIndices(ash_grid_size(grid′))
+        θ, φ = ash_point_coord(grid′, ij)
+        r̂ = SVector(sin(θ) * cos(φ), sin(θ) * sin(φ), cos(θ))
+        @test isapprox(pts′[ij], origin + (2.0 + 0.1 * cos(θ)^2) * r̂; atol=1e-12)
+    end
+end
 
 ################################################################################
 
@@ -234,6 +202,16 @@ end
     @test success
     # Schwarzschild with M=1: proper area 16π M²
     @test isapprox(area, 16π; rtol=1.0e-6)
+end
+
+@testset "Brill-Lindquist on DriscollHealyGrid (SSHT backend)" begin
+    # The finder is backend-agnostic: same physics on a different grid.
+    x₀ = SVector{3}(0.0, 0.0, 0.1)
+    grid = DriscollHealyGrid(7)
+    result = find_horizon(brill_lindquist_metric, x₀, grid, 1.0, 1.0e-8, 100; verbosity=0)
+    @test result.success
+    @test result.grid == grid
+    @test isapprox(result.area, 16π; rtol=1.0e-6)
 end
 
 @testset "Verbosity" begin

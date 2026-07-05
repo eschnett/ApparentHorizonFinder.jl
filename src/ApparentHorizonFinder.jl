@@ -17,14 +17,50 @@ ADM 3+1 Cauchy data at one spatial point, expressed in Cartesian coordinates.
 - `K::SMatrix{3,3}`           — extrinsic curvature with the standard sign
   convention `K_{ij} = −(1/2α)(∂_t γ_{ij} − D_i β_j − D_j β_i)`.
 
-[`find_horizon`](@ref) expects a callable `x::SVector{3,Float64} -> ADMVars`
-that supplies these quantities at every queried point.
+[`find_horizon`](@ref) and [`horizon_area`](@ref) obtain the ADM data through a
+user-supplied *batched* callable
+
+    Xs::AbstractArray{SVector{3,Float64}} -> AbstractArray{<:ADMVars}
+
+that receives **all** queried Cartesian points at once (a grid-shaped
+`Matrix{SVector{3,Float64}}`) and returns the `ADMVars` for each, in an array of
+the **same shape**. Evaluating all points together lets the caller parallelize
+the metric evaluation (threads, `pmap`, GPU, batched autodiff, …).
+
+For backward compatibility a per-point callable `x::SVector{3,Float64} ->
+ADMVars` is still accepted: one whose argument is annotated `::SVector{3}` is
+detected and wrapped automatically, and a bare (untyped) per-point closure can
+be wrapped explicitly with [`pointwise`](@ref).
 """
 struct ADMVars{T}
     γ::SMatrix{3,3,T,3^2}
     ∂γ::SArray{Tuple{3,3,3},T,3,3^3}    # ∂γ[i,j,k] = ∂_k γ_{ij}
     K::SMatrix{3,3,T,3^2}
 end
+
+# Adapt a user ADM provider to the batched interface
+#     batched:  Xs::AbstractArray{<:SVector{3}} -> AbstractArray{<:ADMVars}
+# A pointwise provider (X::SVector{3} -> ADMVars) is detected because it is NOT
+# applicable to an array of points, and is wrapped via `map`. Detection is
+# type-based (via `applicable`), so it is cheap and independent of the array's
+# shape or contents. A single `SVector` is itself a 1-D `AbstractArray`, so the
+# probe uses a `Matrix` (never mistaken for one point) to avoid false positives.
+function _batched_admvars(admvars)
+    sample = Matrix{SVector{3,Float64}}(undef, 0, 0)
+    return applicable(admvars, sample) ? admvars : Xs -> map(admvars, Xs)
+end
+
+export pointwise
+"""
+    pointwise(f) -> batched callable
+
+Wrap a per-point ADM provider `f(x::SVector{3,Float64}) -> ADMVars` so it can be
+passed to [`find_horizon`](@ref) / [`horizon_area`](@ref) under the batched API
+(see [`ADMVars`](@ref)). This is only needed for bare (untyped) closures that
+auto-detection cannot classify; a function whose argument is annotated
+`::SVector{3}` is detected and wrapped automatically.
+"""
+pointwise(f) = Xs -> map(f, Xs)
 
 "Map-reduce over the (l, m) modes of a spin-`s` coefficient vector"
 function mode_mapreduce(op, f, alm::AbstractVector, grid::SphereGrid, s::Int; init)
@@ -69,8 +105,12 @@ each iteration:
    for good convergence.
 
 # Arguments
-- `admvars`: callable `admvars(x::SVector{3,Float64}) -> ADMVars` returning the
-  local ADM data at the Cartesian point `x`.
+- `admvars`: batched callable
+  `admvars(Xs::AbstractArray{SVector{3,Float64}}) -> AbstractArray{<:ADMVars}`
+  returning the local ADM data at every Cartesian surface point at once, in an
+  array of the same shape as `Xs` (see [`ADMVars`](@ref)). A per-point callable
+  `x::SVector{3,Float64} -> ADMVars` is also accepted (auto-detected when its
+  argument is annotated `::SVector{3}`, or wrapped with [`pointwise`](@ref)).
 - `origin::SVector{3,Float64}`: initial parametrisation origin. Must lie
   inside the star-shaped candidate surface.
 - `grid::SphereGrid`: the collocation grid (and thereby the transform
@@ -259,18 +299,26 @@ the third form resamples the shape onto a different grid `grid′` (spectral
 zero-padding or truncation via `AbstractSphericalHarmonics.ash_resample` —
 the grids may even belong to different backends).
 """
-function horizon_points(origin::SVector{3,Float64}, grid::SphereGrid, hlm::Vector{ComplexF64})
-    @assert length(hlm) == ash_nmodes(grid)[1]
-    h = real.(ash_evaluate(grid, hlm, 0))
-    pts = Matrix{SVector{3,Float64}}(undef, ash_grid_size(grid)...)
-    for ij in CartesianIndices(pts)
+# Cartesian points of the surface X(θ,φ) = origin + h(θ,φ) r̂(θ,φ) sampled on the
+# collocation grid, given h already evaluated on the grid. Shared by the query
+# sites (`expansion`, `horizon_area`) so the batched ADM call sees exactly these
+# points, and by `horizon_points`.
+function _surface_points(origin::SVector{3,Float64}, grid::SphereGrid, h::AbstractMatrix)
+    @assert size(h) == ash_grid_size(grid)
+    Xs = Matrix{SVector{3,Float64}}(undef, ash_grid_size(grid)...)
+    for ij in CartesianIndices(Xs)
         θ, φ = ash_point_coord(grid, ij)
         sθ, cθ = sincos(θ)
         sφ, cφ = sincos(φ)
         r̂ = SVector(sθ * cφ, sθ * sφ, cθ)
-        pts[ij] = origin + h[ij] * r̂
+        Xs[ij] = origin + h[ij] * r̂
     end
-    return pts
+    return Xs
+end
+
+function horizon_points(origin::SVector{3,Float64}, grid::SphereGrid, hlm::Vector{ComplexF64})
+    @assert length(hlm) == ash_nmodes(grid)[1]
+    return _surface_points(origin, grid, real.(ash_evaluate(grid, hlm, 0)))
 end
 horizon_points(result::NamedTuple) = horizon_points(result.origin, result.grid, result.hlm)
 function horizon_points(result::NamedTuple, grid′::SphereGrid)
@@ -329,7 +377,9 @@ export horizon_area
 
 Compute the proper area `∮ √(det q) d²y` of the surface described by `origin`
 and `hlm`, where `q_AB` is the 2-metric induced on the surface by the spatial
-metric `γ_ij` supplied by `admvars` (see [`find_horizon`](@ref)).
+metric `γ_ij` supplied by `admvars`. `admvars` uses the same batched (or
+auto-detected per-point) interface as in [`find_horizon`](@ref); see
+[`ADMVars`](@ref).
 
 The surface `X(θ, φ) = origin + h(θ, φ) r̂(θ, φ)` is differentiated spectrally,
 the induced metric is sampled on the collocation grid, and the area element is
@@ -341,9 +391,14 @@ The second form accepts the `NamedTuple` returned by [`find_horizon`](@ref).
 function horizon_area(admvars, origin::SVector{3,Float64}, grid::SphereGrid, hlm::Vector{ComplexF64})
     @assert length(hlm) == ash_nmodes(grid)[1]
 
+    admvars = _batched_admvars(admvars)
+
     h = real.(ash_evaluate(grid, hlm, 0))
     # ðh = −(∂_θ + (i/sinθ) ∂_φ) h on the grid (Wikipedia eth convention)
     ðh = ash_evaluate(grid, ash_eth(grid, hlm, 0), 1)
+
+    # ADM data at every surface point, evaluated in a single batched call.
+    adms = admvars(_surface_points(origin, grid, h))
 
     # Area element per unit solid angle: f = √(det q) / sinθ, built from the
     # orthonormal-frame tangents e_θ = ∂_θ X and e_φ̂ = (1/sinθ) ∂_φ X, which
@@ -362,8 +417,7 @@ function horizon_area(admvars, origin::SVector{3,Float64}, grid::SphereGrid, hlm
         eθ = vθ * r̂ + h[ij] * θ̂
         eφ = vφ * r̂ + h[ij] * φ̂
 
-        X = origin + h[ij] * r̂
-        γ = admvars(X).γ
+        γ = adms[ij].γ
 
         qθθ = dot(eθ, γ * eθ)
         qθφ = dot(eθ, γ * eφ)
@@ -379,6 +433,8 @@ horizon_area(admvars, result::NamedTuple) = horizon_area(admvars, result.origin,
 
 function expansion(admvars, origin::SVector{3}, grid::SphereGrid, hlm::Vector{ComplexF64}; modification=nothing)
     lmax = ash_lmax(grid)
+
+    admvars = _batched_admvars(admvars)
 
     h = real.(ash_evaluate(grid, hlm, 0))
 
@@ -401,6 +457,9 @@ function expansion(admvars, origin::SVector{3}, grid::SphereGrid, hlm::Vector{Co
     # Δh = H_θ̂θ̂ + H_φ̂φ̂ this yields the full Hessian.
     ð2h = ash_evaluate(grid, ash_eth(grid, ash_eth(grid, hlm, 0), 1), 2)
 
+    # ADM data at every surface point, evaluated in a single batched call.
+    adms = admvars(_surface_points(origin, grid, h))
+
     H = Matrix{Float64}(undef, ash_grid_size(grid)...)
     for ij in CartesianIndices(H)
         θ, φ = ash_point_coord(grid, ij)
@@ -412,7 +471,7 @@ function expansion(admvars, origin::SVector{3}, grid::SphereGrid, hlm::Vector{Co
         Hθθ = (Δhij + re_ð2) / 2            # ∂²_θ h
         Hφφ = (Δhij - re_ð2) / 2            # (1/sin²θ) ∂²_φ h + cotθ ∂_θ h
         Hθφ = im_ð2 / 2                     # (1/sinθ) ∂_θ ∂_φ h − cotθ v_φ̂
-        H[ij] = expansion_at_point(admvars, origin, θ, φ, h[ij], vθ, vφ, Hθθ, Hφφ, Hθφ; modification)
+        H[ij] = expansion_at_point(adms[ij], θ, φ, h[ij], vθ, vφ, Hθθ, Hφφ, Hθφ; modification)
     end
 
     Hlm = ash_transform(grid, ComplexF64.(H), 0)
@@ -420,8 +479,8 @@ function expansion(admvars, origin::SVector{3}, grid::SphereGrid, hlm::Vector{Co
 end
 
 # Build ∂_i F and ∂_i ∂_j F in Cartesian components at one collocation point, then
-# evaluate the expansion using the ADM data at that point.
-function expansion_at_point(admvars, origin::SVector{3}, θ, φ, h, vθ, vφ, Hθθ, Hφφ, Hθφ; modification=nothing)
+# evaluate the expansion using the ADM data `adm` supplied at that point.
+function expansion_at_point(adm::ADMVars, θ, φ, h, vθ, vφ, Hθθ, Hφφ, Hθφ; modification=nothing)
     sθ, cθ = sincos(θ)
     sφ, cφ = sincos(φ)
 
@@ -429,9 +488,6 @@ function expansion_at_point(admvars, origin::SVector{3}, θ, φ, h, vθ, vφ, H�
     r̂ = SVector(sθ * cφ, sθ * sφ, cθ)
     θ̂ = SVector(cθ * cφ, cθ * sφ, -sθ)
     φ̂ = SVector(-sφ, cφ, zero(θ))
-
-    # Cartesian position of the surface point (F = 0)
-    X = origin + h * r̂
 
     # ∇F and ∇²F in the orthonormal spherical basis (smooth at poles)
     ∇F_sph = SVector(1.0, -vθ / h, -vφ / h)
@@ -443,7 +499,6 @@ function expansion_at_point(admvars, origin::SVector{3}, θ, φ, h, vθ, vφ, H�
     ∇²F = R * HF_sph * R'
 
     # H = D_i s^i + K_{ij} s^i s^j - K  with  s^i = γ^{ij} ∂_j F / |∇F|_γ.
-    adm = admvars(X)
     γ = adm.γ
     ∂γ = adm.∂γ                 # ∂γ[i,j,k] = ∂_k γ_{ij}
     K = adm.K

@@ -46,8 +46,8 @@ See also
 Let us look for the horizon of a [rotating black
 hole](https://en.wikipedia.org/wiki/Kerr_metric) in Kerr-Schild
 coordinates. We first define the metric. This function is called from
-the horizon finder; it needs to take a 3d point as input and return an
-`ADMVars` struct.
+the horizon finder to supply the ADM 3+1 data (an `ADMVars` struct) at
+each queried point. The simplest form takes a single 3d point:
 
 ```julia
 using ApparentHorizonFinder
@@ -66,6 +66,26 @@ function kerr_schild_metric(p::SVector{3})
     admvars = ADMVars(γ, ∂γ, K)
     return admvars
 end
+```
+
+Such a per-point function annotated with `::SVector{3}` is detected and
+used automatically. The horizon finder's native interface is however
+*batched*: it hands the metric function **all** surface points at once
+(a grid-shaped array of `SVector{3,Float64}`) and expects an array of
+`ADMVars` of the same shape. Evaluating all points together lets you
+parallelize the (often expensive) metric evaluation — for example with
+threads:
+
+```julia
+using ApparentHorizonFinder: pointwise   # optional explicit per-point wrapper
+
+# Batched metric: replace `map` with a parallel map (e.g. ThreadsX.map) to
+# distribute the work across threads or processes.
+batched_metric(Xs) = map(kerr_schild_metric, Xs)
+
+# `find_horizon(kerr_schild_metric, …)` and
+# `find_horizon(pointwise(kerr_schild_metric), …)` are equivalent to the
+# batched call and all produce the same result.
 ```
 
 ### Find horizon

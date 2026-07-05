@@ -419,3 +419,51 @@ end
     success, iters, origin, hlm = find_horizon(harmonic_metric, x₀, N, r, atol, maxiters)
     @test success
 end
+
+################################################################################
+
+@testset "Batched ADM interface" begin
+    x₀ = SVector{3}(0.0, 0.0, 0.1)
+    N = 8
+    r = 2.0
+    atol = 1.0e-8
+    maxiters = 100
+
+    # Reference: the auto-detected per-point call (kerr_schild_metric has its
+    # argument annotated ::SVector{3}, so it is classified pointwise).
+    ref = find_horizon(kerr_schild_metric, x₀, N, r, atol, maxiters; verbosity=0)
+    @test ref.success
+
+    # Native batched interface, bare (untyped) closure: receives all surface
+    # points at once and returns an array of ADMVars of the same shape.
+    batched_bare(Xs) = map(kerr_schild_metric, Xs)
+    res_bare = find_horizon(batched_bare, x₀, N, r, atol, maxiters; verbosity=0)
+    @test res_bare.success
+    @test res_bare.iters == ref.iters
+    @test res_bare.origin ≈ ref.origin
+    @test res_bare.hlm ≈ ref.hlm
+    @test res_bare.area ≈ ref.area
+
+    # Batched function with an annotated array argument is also auto-classified
+    # as batched (a single SVector is not an AbstractArray{<:SVector{3}}).
+    batched_annotated(Xs::AbstractArray{<:SVector{3}}) = map(kerr_schild_metric, Xs)
+    res_ann = find_horizon(batched_annotated, x₀, N, r, atol, maxiters; verbosity=0)
+    @test res_ann.hlm ≈ ref.hlm
+    @test res_ann.area ≈ ref.area
+
+    # Explicit `pointwise` wrapper reproduces the auto-detected per-point call.
+    res_pw = find_horizon(pointwise(brill_lindquist_metric), x₀, N, 1.0, atol, maxiters; verbosity=0)
+    ref_bl = find_horizon(brill_lindquist_metric, x₀, N, 1.0, atol, maxiters; verbosity=0)
+    @test res_pw.hlm ≈ ref_bl.hlm
+    @test res_pw.area ≈ ref_bl.area
+
+    # A bare per-point closure cannot be auto-classified (untyped → treated as
+    # batched), so it must be wrapped with `pointwise`.
+    bare_pointwise = p -> kerr_schild_metric(p)
+    res_wrap = find_horizon(pointwise(bare_pointwise), x₀, N, r, atol, maxiters; verbosity=0)
+    @test res_wrap.area ≈ ref.area
+
+    # horizon_area accepts the batched interface as well.
+    @test horizon_area(batched_bare, ref) ≈ ref.area
+    @test horizon_area(pointwise(kerr_schild_metric), ref) ≈ ref.area
+end

@@ -99,7 +99,7 @@ r = 2.0
 atol = 1.0e-8
 maxiters = 100
 AH = find_horizon(kerr_schild_metric, x₀, N, r, atol, maxiters)
-pts = horizon_points(AH.origin, AH.hlm)
+pts = horizon_points(AH)
 ```
 
 The number of points (and the number of multipoles) depends on the chosen `N`.

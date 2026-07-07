@@ -282,23 +282,6 @@ function find_horizon(
 end
 
 export horizon_points
-"""
-    horizon_points(origin::SVector{3,Float64}, grid::SphereGrid,
-                   hlm::Vector{ComplexF64}) -> Matrix{SVector{3,Float64}}
-    horizon_points(result) -> Matrix{SVector{3,Float64}}
-    horizon_points(result, grid′::SphereGrid) -> Matrix{SVector{3,Float64}}
-
-Reconstruct the Cartesian points of the horizon surface on the collocation
-grid (size `ash_grid_size(grid)`).  Each entry is
-`origin + h(θ, φ) · r̂(θ, φ)` at the grid point's `(θ, φ)` from
-`AbstractSphericalHarmonics.ash_point_coord`, where
-`r̂ = (sin θ cos φ, sin θ sin φ, cos θ)`.
-
-The second form accepts the `NamedTuple` returned by [`find_horizon`](@ref);
-the third form resamples the shape onto a different grid `grid′` (spectral
-zero-padding or truncation via `AbstractSphericalHarmonics.ash_resample` —
-the grids may even belong to different backends).
-"""
 # Cartesian points of the surface X(θ,φ) = origin + h(θ,φ) r̂(θ,φ) sampled on the
 # collocation grid, given h already evaluated on the grid. Shared by the query
 # sites (`expansion`, `horizon_area`) so the batched ADM call sees exactly these
@@ -316,6 +299,23 @@ function _surface_points(origin::SVector{3,Float64}, grid::SphereGrid, h::Abstra
     return Xs
 end
 
+"""
+    horizon_points(origin::SVector{3,Float64}, grid::SphereGrid,
+                   hlm::Vector{ComplexF64}) -> Matrix{SVector{3,Float64}}
+    horizon_points(result) -> Matrix{SVector{3,Float64}}
+    horizon_points(result, grid′::SphereGrid) -> Matrix{SVector{3,Float64}}
+
+Reconstruct the Cartesian points of the horizon surface on the collocation
+grid (size `ash_grid_size(grid)`).  Each entry is
+`origin + h(θ, φ) · r̂(θ, φ)` at the grid point's `(θ, φ)` from
+`AbstractSphericalHarmonics.ash_point_coord`, where
+`r̂ = (sin θ cos φ, sin θ sin φ, cos θ)`.
+
+The second form accepts the `NamedTuple` returned by [`find_horizon`](@ref);
+the third form resamples the shape onto a different grid `grid′` (spectral
+zero-padding or truncation via `AbstractSphericalHarmonics.ash_resample` —
+the grids may even belong to different backends).
+"""
 function horizon_points(origin::SVector{3,Float64}, grid::SphereGrid, hlm::Vector{ComplexF64})
     @assert length(hlm) == ash_nmodes(grid)[1]
     return _surface_points(origin, grid, real.(ash_evaluate(grid, hlm, 0)))
